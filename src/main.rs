@@ -103,11 +103,26 @@ impl Clipboard {
         } else {
             let mut table = Table::new();
             table.add_row(row!["Key", "Value"]);
+            table.set_format(*format::consts::FORMAT_BOX_CHARS);
             for (key, value) in &matched_data {
                 table.add_row(row![key, value]);
             }
             table.printstd();
         }
+        Ok(())
+    }
+
+    fn delete(&mut self) -> Result<(), Box<dyn Error>> {
+        let options = self.data.keys().cloned().collect::<Vec<String>>();
+        let index = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Select a key to delete:")
+            .items(&options)
+            .default(0)
+            .interact()?;
+        let key = options[index].clone();
+        self.data.remove(&key);
+        self.save_data()?;
+        println!("Data deleted!");
         Ok(())
     }
 }
@@ -123,7 +138,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Clipboard::new("clipboard.json")
     };
 
-    let choices = vec!["Save", "Load", "List", "Search", "Quit"];
+    let choices = vec!["Save", "Load", "List", "Search", "Delete", "Quit"];
     loop {
         let choice = Select::with_theme(&ColorfulTheme::default())
             .with_prompt("Select an action:")
@@ -135,7 +150,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             1 => clipboard.load()?,
             2 => clipboard.list()?,
             3 => clipboard.search()?,
-            4 => {
+            4 => clipboard.delete()?,
+            5 => {
                 clipboard.save_data()?;
                 println!("Data saved before quitting.");
                 process::exit(0);
