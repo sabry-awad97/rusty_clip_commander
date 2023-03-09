@@ -258,6 +258,7 @@ name = "multiclipboard"
 version = "0.1.0"
 dependencies = [
  "clipboard",
+ "csv",
  "dialoguer",
  "prettytable-rs",
  "serde",

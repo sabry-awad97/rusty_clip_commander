@@ -125,6 +125,45 @@ impl Clipboard {
         println!("Data deleted!");
         Ok(())
     }
+
+    fn export(&self, format: &str) -> Result<(), Box<dyn Error>> {
+        let file = fs::File::create(format!("clipboard.{}", format))?;
+
+        match format {
+            "json" => serde_json::to_writer_pretty(file, &self.data)?,
+            "csv" => {
+                let mut writer = csv::Writer::from_writer(file);
+                for (key, value) in &self.data {
+                    writer.write_record(&[key, value])?;
+                }
+                writer.flush()?;
+            }
+            _ => return Err("Unsupported format".into()),
+        }
+
+        println!("Data exported as {}!", format.to_uppercase());
+        Ok(())
+    }
+
+    fn import(&mut self, format: &str, filepath: &str) -> Result<(), Box<dyn Error>> {
+        let file = fs::File::open(filepath)?;
+        match format {
+            "json" => {
+                let data: HashMap<String, String> = serde_json::from_reader(file)?;
+                self.data.extend(data);
+            }
+            "csv" => {
+                let mut reader = csv::Reader::from_reader(file);
+                for result in reader.records() {
+                    let record = result?;
+                    self.data.insert(record[0].to_owned(), record[1].to_owned());
+                }
+            }
+            _ => return Err("Unsupported format".into()),
+        }
+        println!("Data imported from {}!", format.to_uppercase());
+        Ok(())
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -138,7 +177,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         Clipboard::new("clipboard.json")
     };
 
-    let choices = vec!["Save", "Load", "List", "Search", "Delete", "Quit"];
+    let choices = vec![
+        "Save", "Load", "List", "Search", "Delete", "Export", "Import", "Quit",
+    ];
     loop {
         let choice = Select::with_theme(&ColorfulTheme::default())
             .with_prompt("Select an action:")
@@ -151,7 +192,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             2 => clipboard.list()?,
             3 => clipboard.search()?,
             4 => clipboard.delete()?,
-            5 => {
+            5 => clipboard.export("json")?,
+            6 => {
+                let format_choices = vec!["json", "csv"];
+                let format = Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Select a format:")
+                    .items(&format_choices)
+                    .default(0)
+                    .interact()?;
+                let filepath = Input::<String>::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Enter file path:")
+                    .interact()?;
+                clipboard.import(format_choices[format], &filepath)?;
+            }
+            7 => {
                 clipboard.save_data()?;
                 println!("Data saved before quitting.");
                 process::exit(0);
