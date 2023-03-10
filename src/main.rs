@@ -4,15 +4,16 @@ use prettytable::{format, row, Cell, Row, Table};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
-use std::fs;
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::process;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct Clipboard {
-    data: HashMap<String, String>,
+    data: HashMap<String, HashMap<String, String>>,
     filepath: String,
+    current: String,
 }
 
 impl Clipboard {
@@ -20,6 +21,7 @@ impl Clipboard {
         Self {
             data: HashMap::new(),
             filepath: filepath.to_string(),
+            current: "default".to_string(),
         }
     }
 
@@ -37,27 +39,45 @@ impl Clipboard {
     }
 
     fn save(&mut self) -> Result<(), Box<dyn Error>> {
-        let key = Input::<String>::with_theme(&ColorfulTheme::default())
-            .with_prompt("Enter key:")
+        let history_name = Input::<String>::with_theme(&ColorfulTheme::default())
+            .with_prompt("Enter clipboard history name:")
             .interact()?;
         let mut clipboard_ctx: ClipboardContext = ClipboardProvider::new()?;
         let value = clipboard_ctx.get_contents()?.to_owned();
-        self.data.insert(key, value);
+        self.data
+            .entry(history_name.clone())
+            .or_insert(HashMap::new())
+            .insert(
+                Input::<String>::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Enter key:")
+                    .interact()?,
+                value,
+            );
         self.save_data()?;
-        println!("Data saved!");
+        println!("Data saved to clipboard history: {}", history_name);
         Ok(())
     }
 
     fn load(&mut self) -> Result<(), Box<dyn Error>> {
-        let options = self.data.keys().cloned().collect::<Vec<String>>();
+        let history_names = self.data.keys().cloned().collect::<Vec<String>>();
+        let index = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Select a clipboard history to load:")
+            .items(&history_names)
+            .default(0)
+            .interact()?;
+        self.current = history_names[index].clone();
+        let options = self.data[&self.current]
+            .keys()
+            .cloned()
+            .collect::<Vec<String>>();
         let index = Select::with_theme(&ColorfulTheme::default())
             .with_prompt("Select a key to load:")
             .items(&options)
             .default(0)
             .interact()?;
         let key = options[index].clone();
-        let value = self.data.get(&key).unwrap().to_owned();
-        let mut clipboard_ctx: ClipboardContext = ClipboardProvider::new().unwrap();
+        let value = self.data[&self.current].get(&key).unwrap().to_owned();
+        let mut clipboard_ctx: ClipboardContext = ClipboardProvider::new()?;
         clipboard_ctx.set_contents(value)?;
         println!("Data copied to clipboard.");
         Ok(())
@@ -67,12 +87,18 @@ impl Clipboard {
         let mut table = Table::new();
         table.set_format(*format::consts::FORMAT_BOX_CHARS);
 
-        let header = Row::new(vec![Cell::new("Key"), Cell::new("Value")]);
+        let header = Row::new(vec![
+            Cell::new("History"),
+            Cell::new("Key"),
+            Cell::new("Value"),
+        ]);
         table.add_row(header);
 
-        for (key, value) in &self.data {
-            let row = Row::new(vec![Cell::new(key), Cell::new(value)]);
-            table.add_row(row);
+        for (history_name, map) in &self.data {
+            table.add_row(row![history_name, "", ""]);
+            for (key, value) in map {
+                table.add_row(row!["", key, value]);
+            }
         }
 
         table.printstd();
@@ -91,21 +117,29 @@ impl Clipboard {
             })
             .interact()?;
 
-        let matched_data = self
-            .data
-            .iter()
-            .filter(|(key, value)| key.contains(&search_term) || value.contains(&search_term))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect::<HashMap<_, _>>();
+        let mut matched_data = HashMap::new();
+        for (history_name, inner_map) in &self.data {
+            for (inner_key, inner_value) in inner_map {
+                if history_name.contains(&search_term)
+                    || inner_key.contains(&search_term)
+                    || inner_value.contains(&search_term)
+                {
+                    matched_data.insert(history_name.clone(), inner_map.clone());
+                    break;
+                }
+            }
+        }
 
         if matched_data.is_empty() {
-            println!("No matching data found.");
+            println!("No results found for search term: {}", search_term);
         } else {
             let mut table = Table::new();
-            table.add_row(row!["Key", "Value"]);
+            table.add_row(row!["History", "Key", "Value"]);
             table.set_format(*format::consts::FORMAT_BOX_CHARS);
-            for (key, value) in &matched_data {
-                table.add_row(row![key, value]);
+            for (key, inner_map) in &matched_data {
+                for (inner_key, inner_value) in inner_map {
+                    table.add_row(row![key, inner_key, inner_value]);
+                }
             }
             table.printstd();
         }
@@ -113,55 +147,134 @@ impl Clipboard {
     }
 
     fn delete(&mut self) -> Result<(), Box<dyn Error>> {
-        let options = self.data.keys().cloned().collect::<Vec<String>>();
+        let history_names = self.data.keys().cloned().collect::<Vec<String>>();
+        let index = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Select a clipboard history to delete from:")
+            .items(&history_names)
+            .default(0)
+            .interact()?;
+        let history_name = history_names[index].clone();
+        let options = self.data[&history_name]
+            .keys()
+            .cloned()
+            .collect::<Vec<String>>();
         let index = Select::with_theme(&ColorfulTheme::default())
             .with_prompt("Select a key to delete:")
             .items(&options)
             .default(0)
             .interact()?;
         let key = options[index].clone();
-        self.data.remove(&key);
+        self.data.get_mut(&history_name).unwrap().remove(&key);
         self.save_data()?;
-        println!("Data deleted!");
+        println!("Key deleted from clipboard history: {}", history_name);
         Ok(())
     }
 
-    fn export(&self, format: &str) -> Result<(), Box<dyn Error>> {
-        let file = fs::File::create(format!("clipboard.{}", format))?;
+    fn export(&self) -> Result<(), Box<dyn Error>> {
+        let export_options = vec!["CSV", "JSON", "Exit"];
+        let export_choice = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Export data as:")
+            .items(&export_options)
+            .default(0)
+            .interact()?;
 
-        match format {
-            "json" => serde_json::to_writer_pretty(file, &self.data)?,
-            "csv" => {
+        match export_options[export_choice] {
+            "JSON" => {
+                let filename = Input::<String>::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Enter the filename for JSON export:")
+                    .interact()?;
+                let file = File::create(&filename)?;
+                let writer = BufWriter::new(file);
+                serde_json::to_writer_pretty(writer, &self.data)?;
+                println!("Clipboard data exported to {}.", filename);
+            }
+            "CSV" => {
+                let filename = Input::<String>::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Enter the filename for CSV export:")
+                    .interact()?;
+
+                let file = File::create(&filename)?;
                 let mut writer = csv::Writer::from_writer(file);
-                for (key, value) in &self.data {
-                    writer.write_record(&[key, value])?;
+                for (history_name, map) in &self.data {
+                    for (key, value) in map {
+                        writer.serialize(&[history_name, key, value])?;
+                    }
                 }
                 writer.flush()?;
+                println!("Clipboard data exported to {}.", filename);
+            }
+            "Exit" => {
+                println!("Export cancelled.");
             }
             _ => return Err("Unsupported format".into()),
         }
 
-        println!("Data exported as {}!", format.to_uppercase());
         Ok(())
     }
 
-    fn import(&mut self, format: &str, filepath: &str) -> Result<(), Box<dyn Error>> {
-        let file = fs::File::open(filepath)?;
-        match format {
-            "json" => {
-                let data: HashMap<String, String> = serde_json::from_reader(file)?;
-                self.data.extend(data);
+    fn import(&mut self) -> Result<(), Box<dyn Error>> {
+        let import_options = vec!["CSV", "JSON", "Exit"];
+        let import_choice = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Import data from:")
+            .items(&import_options)
+            .default(0)
+            .interact()?;
+
+        match import_options[import_choice] {
+            "JSON" => {
+                let filename = Input::<String>::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Enter the filename for JSON import:")
+                    .interact()?;
+                let file_content = fs::read_to_string(&filename)?;
+                let imported_data: HashMap<String, HashMap<String, String>> =
+                    serde_json::from_str(&file_content)?;
+                self.merge_data(imported_data)?;
+                println!("Data imported from {}.", filename);
             }
-            "csv" => {
+            "CSV" => {
+                let filename = Input::<String>::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Enter the filename for CSV import:")
+                    .interact()?;
+
+                let file = File::open(&filename)?;
                 let mut reader = csv::Reader::from_reader(file);
-                for result in reader.records() {
-                    let record = result?;
-                    self.data.insert(record[0].to_owned(), record[1].to_owned());
+                let mut imported_data = HashMap::new();
+                for result in reader.deserialize() {
+                    let record: Vec<String> = result?;
+                    let history_name = record[0].clone();
+                    let key = record[1].clone();
+                    let value = record[2].clone();
+                    imported_data
+                        .entry(history_name)
+                        .or_insert(HashMap::new())
+                        .insert(key, value);
                 }
+                self.merge_data(imported_data)?;
+                println!("Data imported from {}.", filename);
+            }
+            "Exit" => {
+                println!("Import cancelled.");
             }
             _ => return Err("Unsupported format".into()),
         }
-        println!("Data imported from {}!", format.to_uppercase());
+
+        Ok(())
+    }
+
+    fn merge_data(
+        &mut self,
+        imported_data: HashMap<String, HashMap<String, String>>,
+    ) -> Result<(), Box<dyn Error>> {
+        for (history_name, map) in imported_data {
+            let existing_map = self
+                .data
+                .entry(history_name.clone())
+                .or_insert(HashMap::new());
+            
+            for (key, value) in map {
+                existing_map.insert(key, value);
+            }
+        }
         Ok(())
     }
 }
@@ -192,19 +305,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             2 => clipboard.list()?,
             3 => clipboard.search()?,
             4 => clipboard.delete()?,
-            5 => clipboard.export("json")?,
-            6 => {
-                let format_choices = vec!["json", "csv"];
-                let format = Select::with_theme(&ColorfulTheme::default())
-                    .with_prompt("Select a format:")
-                    .items(&format_choices)
-                    .default(0)
-                    .interact()?;
-                let filepath = Input::<String>::with_theme(&ColorfulTheme::default())
-                    .with_prompt("Enter file path:")
-                    .interact()?;
-                clipboard.import(format_choices[format], &filepath)?;
-            }
+            5 => clipboard.export()?,
+            6 => clipboard.import()?,
             7 => {
                 clipboard.save_data()?;
                 println!("Data saved before quitting.");
